@@ -19,6 +19,7 @@ load_dotenv()
 import os
 
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -33,6 +34,17 @@ ALLOWED_CHAT_ID = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID")
 # One conversation history per Telegram chat, so multiple chats don't bleed
 # into each other's context.
 _sessions: dict[int, Jarvis] = {}
+
+# Updates are processed one at a time per chat (concurrent_updates is off by
+# default -- confirmed, not assumed), so there's no actual race between
+# messages. But a real task can now take 20-40s+ (click_at/type_text each
+# run a Gemini vision verification call), and with zero acknowledgment that
+# a message even arrived, the natural reaction is "did that go through?" ->
+# resend -> resend again. Those pile up and then run back-to-back with no
+# confirmation in between, which *looks* like chaos even though it's
+# strictly sequential. Tracking busy-per-chat lets the immediate ack say
+# what's actually happening instead of just going quiet.
+_busy: dict[int, bool] = {}
 
 
 def _get_jarvis(chat_id: int) -> Jarvis:
@@ -71,12 +83,26 @@ async def _handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  
         await message.reply_text("(didn't catch any words in that)")
         return
 
-    jarvis = _get_jarvis(chat_id)
-    # jarvis.ask() is synchronous and can call Playwright's *sync* API (via
-    # the browser tools), which refuses to run inside a thread that already
-    # has an asyncio event loop -- this handler is exactly that thread. Run
-    # it in a plain worker thread (no event loop of its own) instead.
-    reply = await asyncio.to_thread(jarvis.ask, text)
+    # Immediate ack so a slow task never reads as "didn't go through" --
+    # that's what was causing repeat sends piling up. Distinguishes a fresh
+    # request from one that's now queued behind one still running.
+    if _busy.get(chat_id):
+        await message.reply_text("still on your last one -- this'll go right after")
+    else:
+        await message.reply_text("on it, one sec")
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    _busy[chat_id] = True
+    try:
+        jarvis = _get_jarvis(chat_id)
+        # jarvis.ask() is synchronous and can call Playwright's *sync* API
+        # (via the browser tools), which refuses to run inside a thread that
+        # already has an asyncio event loop -- this handler is exactly that
+        # thread. Run it in a plain worker thread (no event loop of its own)
+        # instead.
+        reply = await asyncio.to_thread(jarvis.ask, text)
+    finally:
+        _busy[chat_id] = False
     await message.reply_text(reply)
 
     # Text-only replies on Telegram (voice replies are a laptop-only thing,
