@@ -11,8 +11,10 @@ close to that bottleneck at normal conversational pace.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from pathlib import Path
 
 import openai
 from openai import OpenAI
@@ -78,7 +80,19 @@ SYSTEM_PROMPT = (
     "or starting to click around without them. Same idea for anything "
     "else where a key detail is missing or ambiguous (which account, which "
     "of several open tabs, etc.) -- one quick question beats doing the "
-    "wrong thing carefully."
+    "wrong thing carefully.\n\n"
+    "If a request names an action but not a target specific enough to find "
+    "-- \"click the button\" with no label, app, or window named -- that's "
+    "exactly the case for one concrete clarifying question up front (\"which "
+    "app is this in, and what does the button say or look like?\"), not "
+    "repeated screenshotting to guess it out. Never call describe_screen or "
+    "click_at more than twice in a row without either landing a verified, "
+    "successful click or stopping to ask the user something specific you're "
+    "missing -- looping on screenshots instead of acting or asking burns "
+    "turns and dumps a pile of near-identical images on the user for "
+    "nothing. If a click_at result's `after` shows nothing changed, that's "
+    "a signal to try find_text_on_screen for an exact target or ask, not to "
+    "retry the same guess or re-describe the same screen again."
 )
 
 
@@ -96,6 +110,26 @@ class Jarvis:
         # during the most recent ask(). Front-ends that can show files (like
         # the Telegram bot) can send these; voice-only front-ends can ignore it.
         self.last_attachments: list[str] = []
+
+    def _add_attachment(self, path: str) -> None:
+        """Queue a screenshot to send back, but skip it if it's byte-identical
+        to one already queued this turn (e.g. describe_screen/click_at called
+        repeatedly against an unchanged screen) -- otherwise a stalled tool
+        loop floods the user with a pile of the same image instead of one."""
+        try:
+            new_hash = hashlib.md5(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            self.last_attachments.append(path)  # can't hash it -- keep it, don't silently drop
+            return
+
+        for existing in self.last_attachments:
+            try:
+                if hashlib.md5(Path(existing).read_bytes()).hexdigest() == new_hash:
+                    Path(path).unlink(missing_ok=True)
+                    return
+            except OSError:
+                continue
+        self.last_attachments.append(path)
 
     def _trim_history(self) -> None:
         """Drop the oldest turns once history exceeds MAX_HISTORY_TURNS,
@@ -132,7 +166,7 @@ class Jarvis:
                     args = json.loads(call.function.arguments or "{}")
                     result = call_tool(call.function.name, args)
                     if isinstance(result, dict) and "_attachment_path" in result:
-                        self.last_attachments.append(result.pop("_attachment_path"))
+                        self._add_attachment(result.pop("_attachment_path"))
                     self.history.append(
                         {
                             "role": "tool",
