@@ -33,7 +33,8 @@ def list_open_tabs() -> dict:
         "name": "screenshot_tab",
         "description": (
             "Screenshot an open tab (index from list_open_tabs, or a "
-            "title/URL hint) to see its current content. Defaults to the "
+            "title/URL hint) and queue one image for delivery. Use only when "
+            "the user requests an image. A later capture replaces it. Defaults to the "
             "most recently opened tab."
         ),
         "parameters": {

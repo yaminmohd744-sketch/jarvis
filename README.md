@@ -237,3 +237,21 @@ research into what actually reads as authentic vs. "trying too hard."
   started talking.
 - If wake-word detection is too sensitive or not sensitive enough, tweak
   `JARVIS_WAKE_THRESHOLD`/`JARVIS_WAKE_GAIN` (see audio.py).
+
+## Screenshot delivery and instruction handling
+
+Internal screen inspection and click/type checks do not send photos to Telegram.
+When you request a screenshot, Jarvis uses `take_screenshot` (desktop) or
+`screenshot_tab` (browser). Each reply delivers at most one image; a later
+explicit capture replaces the previous one. Multiple images require separate
+requests. Desktop voice mode discards image attachments after responding.
+
+Jarvis uses action results to decide the next step and reports invalid tool
+arguments back to the model for correction. Telegram browser actions run on one
+dedicated worker thread to preserve Playwright session ownership.
+
+Offline regression checks (no API key, desktop control, or network required):
+
+```
+python -m unittest discover -s tests -v
+```

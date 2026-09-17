@@ -85,6 +85,19 @@ def open_application(name: str) -> dict:
         return {"status": "error", "app": command, "error": str(exc)}
 
 
+def _is_process_running(exe_name: str) -> bool | None:
+    """True/False if we could check, None if the check itself failed (so the
+    caller doesn't mistake 'couldn't verify' for 'confirmed closed')."""
+    check = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {exe_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        return None
+    return exe_name.lower() in check.stdout.lower()
+
+
 @tool(
     {
         "name": "close_application",
@@ -113,19 +126,6 @@ def open_application(name: str) -> dict:
         },
     }
 )
-def _is_process_running(exe_name: str) -> bool | None:
-    """True/False if we could check, None if the check itself failed (so the
-    caller doesn't mistake 'couldn't verify' for 'confirmed closed')."""
-    check = subprocess.run(
-        ["tasklist", "/FI", f"IMAGENAME eq {exe_name}"],
-        capture_output=True,
-        text=True,
-    )
-    if check.returncode != 0:
-        return None
-    return exe_name.lower() in check.stdout.lower()
-
-
 def close_application(name: str, force: bool = False) -> dict:
     key = name.strip().lower()
 

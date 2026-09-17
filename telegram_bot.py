@@ -8,6 +8,7 @@ this script just needs to be on and connected to the internet.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import tempfile
 from pathlib import Path
@@ -34,6 +35,8 @@ ALLOWED_CHAT_ID = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID")
 # One conversation history per Telegram chat, so multiple chats don't bleed
 # into each other's context.
 _sessions: dict[int, Jarvis] = {}
+# Playwright's synchronous objects must stay on their owning thread.
+_jarvis_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis")
 
 # Updates are processed one at a time per chat (concurrent_updates is off by
 # default -- confirmed, not assumed), so there's no actual race between
@@ -100,20 +103,18 @@ async def _handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  
         # already has an asyncio event loop -- this handler is exactly that
         # thread. Run it in a plain worker thread (no event loop of its own)
         # instead.
-        reply = await asyncio.to_thread(jarvis.ask, text)
+        reply = await asyncio.get_running_loop().run_in_executor(_jarvis_worker, jarvis.ask, text)
     finally:
         _busy[chat_id] = False
-    await message.reply_text(reply)
-
-    # Text-only replies on Telegram (voice replies are a laptop-only thing,
-    # via main.py's speak()). Tools like describe_screen can still attach
-    # files (e.g. the actual screenshot) via Jarvis.last_attachments.
-    for attachment_path in jarvis.last_attachments:
-        try:
+    try:
+        await message.reply_text(reply)
+        for attachment_path in jarvis.last_attachments:
             with open(attachment_path, "rb") as f:
                 await message.reply_photo(f)
-        finally:
+    finally:
+        for attachment_path in jarvis.last_attachments:
             Path(attachment_path).unlink(missing_ok=True)
+        jarvis.last_attachments = []
 
 
 def main() -> None:
@@ -133,7 +134,10 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, _handle))
     print("Jarvis Telegram bot is running. Message your bot to talk to it. (Ctrl+C to stop)")
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        _jarvis_worker.shutdown(wait=True)
 
 
 if __name__ == "__main__":

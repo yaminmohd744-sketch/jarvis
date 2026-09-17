@@ -30,7 +30,7 @@ def _take_screenshot() -> Path:
     {
         "name": "describe_screen",
         "description": (
-            "Take a screenshot of the user's screen right now and describe "
+            "Inspect the screen internally (does not send an image) and describe "
             "it, or answer a specific question about what's currently "
             "visible -- including finding approximate pixel coordinates of "
             "something to click/type into with click_at/type_text. For "
@@ -87,10 +87,23 @@ def describe_screen(question: str = "Describe what's on this screen.") -> dict:
         description = (response.choices[0].message.content or "").strip()
     except Exception as exc:  # noqa: BLE001 - surface any vision-call failure plainly
         return {"error": f"couldn't analyze the screenshot: {exc}"}
+    finally:
+        screenshot_path.unlink(missing_ok=True)
 
-    return {
-        "description": description,
-        # Consumed by Jarvis.ask() and stripped before the LLM ever sees it —
-        # front-ends that can show images (like the Telegram bot) send this file.
-        "_attachment_path": str(screenshot_path),
+    return {"description": description}
+
+
+@tool(
+    {
+        "name": "take_screenshot",
+        "description": (
+            "Capture the desktop screen and queue one image for delivery to the user. "
+            "Use only when the user requests a screenshot, after completing any "
+            "requested actions. No analysis or additional capture is needed. "
+            "A later capture replaces the queued image."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     }
+)
+def take_screenshot() -> dict:
+    return {"status": "captured", "_attachment_path": str(_take_screenshot())}
