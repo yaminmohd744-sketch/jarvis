@@ -92,7 +92,7 @@ async def _handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  
     if _busy.get(chat_id):
         await message.reply_text("still on your last one -- this'll go right after")
     else:
-        await message.reply_text("on it, one sec")
+        await message.reply_text("On it. I’ll work through the request and report what’s completed and anything blocked.")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     _busy[chat_id] = True
@@ -107,7 +107,9 @@ async def _handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  
     finally:
         _busy[chat_id] = False
     try:
-        await message.reply_text(reply)
+        # Keep long completion reports within Telegram’s message limit.
+        for start in range(0, len(reply), 2000):
+            await message.reply_text(reply[start:start + 2000])
         for attachment_path in jarvis.last_attachments:
             with open(attachment_path, "rb") as f:
                 await message.reply_photo(f)

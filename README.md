@@ -255,3 +255,20 @@ Offline regression checks (no API key, desktop control, or network required):
 ```
 python -m unittest discover -s tests -v
 ```
+
+## Larger tasks and completion reports
+
+Give Jarvis the whole request, including all desired outcomes. For multi-step
+work it creates a checklist, executes the steps, and records results or blockers.
+Its final report lists completed items with their results or file locations,
+blocked items with reasons, and any unfinished items if it hits its work limit.
+It continues independent steps when another step is blocked.
+
+Each request allows up to 64 model rounds, including planning and verification.
+API failures preserve action history and return the available progress report.
+Progress is held in memory for the running session; this is not a durable
+background job system and does not survive a restart. Completion assessments
+still depend on the model interpreting tool results correctly. Existing tools,
+account access, and API quotas determine which tasks can actually be completed.
+Telegram splits reports that are too long for a single message. The one-image
+limit still applies.

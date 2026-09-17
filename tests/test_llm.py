@@ -89,6 +89,65 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.jarvis.last_attachments, [])
         self.assertFalse(Path(old).exists())
 
+    def test_large_task_continues_past_old_limit_and_reports_results(self):
+        messages = [Message([call('plan_task', json.dumps({'steps': ['Research', 'Save notes']}))])]
+        messages += [Message([call('web_search')]) for _ in range(18)]
+        messages += [Message([call('update_task', json.dumps({
+            'step': 1, 'status': 'completed', 'detail': 'Compared the search results',
+            'evidence_call_id': 'web_search'}))]),
+            Message(content='I will save the notes next'),
+            Message([call('add_note')]),
+            Message([call('update_task', json.dumps({
+                'step': 2, 'status': 'completed', 'detail': 'Saved to notes/research.md',
+                'evidence_call_id': 'add_note'}))]), Message(content='Done')]
+        self.module.call_tool.return_value = {'status': 'done'}
+        self.responses(*messages)
+        reply = self.jarvis.ask('Research this and save notes')
+        self.assertIn('Completed:', reply)
+        self.assertIn('Research: Compared the search results', reply)
+        self.assertIn('Save notes: Saved to notes/research.md', reply)
+        self.assertEqual(self.module.call_tool.call_count, 19)
+
+    def test_limit_returns_partial_report(self):
+        self.responses(
+            Message([call('plan_task', json.dumps({'steps': ['Read calendar', 'Save summary']}))]),
+            Message([call('get_calendar_events')]),
+            Message([call('update_task', json.dumps({
+                'step': 1, 'status': 'completed', 'detail': 'Found two events',
+                'evidence_call_id': 'get_calendar_events'}))]))
+        self.module.call_tool.return_value = {'events': ['one', 'two']}
+        with patch.object(self.module, 'MAX_TOOL_ROUNDS', 3):
+            reply = self.jarvis.ask('Read calendar and save summary')
+        self.assertIn('Read calendar: Found two events', reply)
+        self.assertIn('Not completed:\n- Save summary', reply)
+
+    def test_failed_action_cannot_be_used_as_completion_evidence(self):
+        progress = self.module.TaskProgress()
+        progress.handle('plan_task', {'steps': ['Save note']})
+        progress.record('failed', {'error': 'Disk full'})
+        result = progress.handle('update_task', {
+            'step': 1, 'status': 'completed', 'detail': 'Saved', 'evidence_call_id': 'failed'})
+        self.assertIn('error', result)
+        self.assertTrue(progress.pending)
+        progress.handle('update_task', {'step': 1, 'status': 'blocked', 'detail': 'Disk full'})
+        self.assertIn('Blocked:\n- Save note: Disk full', progress.report())
+
+    def test_api_failure_preserves_completed_action_and_report(self):
+        self.responses(Message([call('plan_task', json.dumps({'steps': ['Save note']}))]),
+                       Message([call('add_note')]),
+                       Message([call('update_task', json.dumps({
+                           'step': 1, 'status': 'completed', 'detail': 'Saved notes/result.md',
+                           'evidence_call_id': 'add_note'}))]))
+        responses = list(self.jarvis.client.chat.completions.create.side_effect)
+        responses.append(self.module.openai.APIError('offline'))
+        self.jarvis.client.chat.completions.create.side_effect = responses
+        self.module.call_tool.return_value = {'status': 'saved'}
+        with patch.object(self.module, '_friendly_api_error', return_value='Connection failed'):
+            reply = self.jarvis.ask('Save a note')
+        self.assertIn('Connection failed', reply)
+        self.assertIn('Saved notes/result.md', reply)
+        self.assertTrue(any(m.get('tool_call_id') == 'add_note' for m in self.jarvis.history))
+
     def test_close_application_registration(self):
         registry = {}
         package = ModuleType('stub_tools')

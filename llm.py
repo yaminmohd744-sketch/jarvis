@@ -19,6 +19,7 @@ import openai
 from openai import OpenAI
 
 from tools import call_tool, get_tool_schemas
+from task_progress import TASK_SCHEMAS, TaskProgress
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # gemini-3.6-flash's free tier turned out to cap at just 20 requests/day
@@ -35,13 +36,8 @@ MODEL = os.environ.get("JARVIS_MODEL", "gemini-3.5-flash-lite")
 # budget faster than it needs to -- see llm.py's Jarvis._trim_history.
 MAX_HISTORY_TURNS = 6
 
-# How many tool-call round-trips a single ask() can make before giving up.
-# 5 was tuned back when most requests were single-tool (get_current_datetime,
-# open_url). A full multi-app task described in one message (open an app,
-# find a workspace, type into it) can easily chain 8-12 tool calls once
-# Jarvis is actually expected to carry the whole thing through instead of
-# pausing after each step -- see SYSTEM_PROMPT below.
-MAX_TOOL_ROUNDS = 16
+# Bound long tasks while allowing room for planning, execution and verification.
+MAX_TOOL_ROUNDS = 64
 
 SYSTEM_PROMPT = (
     "You are Jarvis, a concise, practical personal assistant. Use plain, natural "
@@ -58,6 +54,17 @@ SYSTEM_PROMPT = (
     "If an action fails, use the error to change your approach; do not repeat "
     "the same failed action indefinitely. Report blockers honestly and never "
     "claim completion without supporting tool results. Stop when done.\n\n"
+    "For requests with multiple steps or deliverables, first call plan_task with "
+    "every requested outcome. Then execute the steps and call update_task as "
+    "each is completed or blocked. Include concrete results and the successful "
+    "action tool call ID as evidence. A successful call alone is not proof: "
+    "read its result and verify the requested outcome. Do not mark an entire "
+    "task completed just because an app opened. Continue independent work when "
+    "one step is blocked. Do not stop with a promise to work later or ask for "
+    "permission to continue an already requested task. Before finishing, account "
+    "for every planned outcome. Your final reply must highlight all completed "
+    "items, useful results or locations, and blockers. For simple questions, "
+    "answer normally without a plan.\n\n"
     "Screen inspection is internal: describe_screen, clicks, typing and form "
     "checks do not send images to the user. When the user asks for a screenshot, "
     "use take_screenshot for the desktop or screenshot_tab for a specific browser "
@@ -108,7 +115,7 @@ class Jarvis:
 
     def ask(self, user_text: str) -> str:
         self._trim_history()
-        history_len_before = len(self.history)
+        progress = TaskProgress()
         self.history.append({"role": "user", "content": user_text})
         for old_path in self.last_attachments:
             Path(old_path).unlink(missing_ok=True)
@@ -119,13 +126,23 @@ class Jarvis:
                 response = self.client.chat.completions.create(
                     model=MODEL,
                     messages=self.history,
-                    tools=get_tool_schemas(),
+                    tools=get_tool_schemas() + TASK_SCHEMAS,
                     tool_choice="auto",
                 )
                 message = response.choices[0].message
                 self.history.append(message.model_dump(exclude_none=True))
 
                 if not message.tool_calls:
+                    if progress.pending:
+                        self.history.append({"role": "system", "content":
+                            "The task still has pending steps. Continue executing them, "
+                            "or mark them blocked with the specific reason. Do not repeat "
+                            "already completed actions. Current checklist: " + progress.report()})
+                        continue
+                    if progress.steps:
+                        report = progress.report()
+                        self.history[-1] = {"role": "assistant", "content": report}
+                        return report
                     return message.content or ""
 
                 for call in message.tool_calls:
@@ -136,7 +153,11 @@ class Jarvis:
                     except (ValueError, TypeError) as exc:
                         result = {"error": f"Invalid tool arguments: {exc}. Correct the arguments."}
                     else:
-                        result = call_tool(call.function.name, args)
+                        if call.function.name in {"plan_task", "update_task"}:
+                            result = progress.handle(call.function.name, args)
+                        else:
+                            result = call_tool(call.function.name, args)
+                            progress.record(call.id, result)
                     if isinstance(result, dict) and "_attachment_path" in result:
                         result = dict(result)
                         path = result.pop("_attachment_path")
@@ -153,16 +174,17 @@ class Jarvis:
                         }
                     )
 
-            return "I got stuck juggling tools on that one — try rephrasing?"
+            report = progress.report("Reached this request's work limit; unfinished items are listed below.")
+            if not progress.steps:
+                report = "Reached this request's work limit before finishing. Some actions may have completed; I couldn't verify the full task."
+            self.history.append({"role": "assistant", "content": report})
+            return report
         except openai.APIError as exc:
-            # Roll back this whole attempt -- don't leave a half-finished turn
-            # (a user message with no real reply) sitting in history, since
-            # that would silently waste tokens re-sending it on the next ask().
-            del self.history[history_len_before:]
-            for old_path in self.last_attachments:
-                Path(old_path).unlink(missing_ok=True)
-            self.last_attachments = []
-            return _friendly_api_error(exc)
+            # Preserve completed actions and their results: rolling back history
+            # could cause a retry to repeat an email, form submission or note.
+            report = progress.report(_friendly_api_error(exc))
+            self.history.append({"role": "assistant", "content": report})
+            return report
 
 
 def _friendly_api_error(exc: openai.APIError) -> str:
